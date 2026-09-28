@@ -3424,7 +3424,8 @@ static void create_status_bar(lv_obj_t *screen, int32_t screen_w, int32_t status
     s_wp7.status_time_label = time_label;
 
     lv_obj_t *battery_label = lv_label_create(bar);
-    lv_label_set_text(battery_label, LV_SYMBOL_BATTERY_3);
+    /* Blank until the fuel gauge reports; see wp7_ui_set_battery(). */
+    lv_label_set_text(battery_label, "");
     lv_obj_set_style_text_color(battery_label, ui_text_color(), 0);
     lv_obj_set_style_text_font(battery_label, &lv_font_montserrat_14, 0);
     lv_obj_align(battery_label, LV_ALIGN_RIGHT_MID, -pad, 0);
@@ -3976,9 +3977,24 @@ void wp7_ui_start(void)
     set_brightness_immediate(s_wp7.brightness_percent);
 }
 
+static const char *battery_symbol(int soc)
+{
+    /* Five glyphs, each centred on 0/25/50/75/100%. */
+    static const char *const symbols[] = {
+        LV_SYMBOL_BATTERY_EMPTY, LV_SYMBOL_BATTERY_1, LV_SYMBOL_BATTERY_2,
+        LV_SYMBOL_BATTERY_3, LV_SYMBOL_BATTERY_FULL,
+    };
+    if (soc > 100) soc = 100;
+    return symbols[(soc + 12) / 25];
+}
+
 void wp7_ui_set_battery(int soc, int mv)
 {
     wp7_apps_set_battery(soc, mv);
+    /* A failed read (-1) keeps the last icon rather than flashing empty. */
+    if (soc >= 0 && s_wp7.status_battery_label != NULL) {
+        lv_label_set_text(s_wp7.status_battery_label, battery_symbol(soc));
+    }
 }
 
 static lv_obj_t *key_setting_obj(int32_t index)
