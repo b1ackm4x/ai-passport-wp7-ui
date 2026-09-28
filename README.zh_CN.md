@@ -16,7 +16,7 @@
 - **Stopwatch**：开始、暂停、记圈与重置；退出页面后仍继续计时。
 - **Focus**：可选 5／15／25／45 分钟计时；退出页面后仍继续计时。首页没有它的磁贴，请从应用列表打开。
 - **Kaboo**：显示今天、7 天或 30 天的 token 数和费用，以及用量最多的模型；数据同样由 Mac 上的 `tools/usage_bridge.py` 通过低功耗蓝牙推送。
-- **Claude**：显示 5 小时与 7 天额度用量及重置倒计时，数据由 Mac 上的 `tools/usage_bridge.py` 通过低功耗蓝牙推送。首次收到数据前显示 "Waiting for Mac"，超过 15 分钟未更新的数据标为过期；不会显示虚构用量。
+- **Claude**：显示 5 小时与 7 天额度用量及重置倒计时，数据由 Mac 上的 `tools/usage_bridge.py` 通过低功耗蓝牙推送。百分比和进度条平时使用主题色，用量达到 70% 变黄，达到 90% 变红。首次收到数据前显示 "Waiting for Mac"，超过 15 分钟未更新的数据标为过期；不会显示虚构用量。
 - 状态栏的 Wi-Fi 和电池图标沿用界面样式，不代表实际连接状态或实时电量；实际电量请看 Battery 页面。
 
 目标硬件是 **ESP32-C3、8 MB Flash、无 PSRAM、ST7789P3 240 × 320 SPI 屏、三键 ADC 输入** 的 FoloToy AI Passport。其他 ESP32 板卡需要调整 `components/passport_bsp` 中的引脚、显示与输入驱动。

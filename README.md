@@ -16,7 +16,7 @@ A standalone ESP-IDF application for the **FoloToy AI Passport**. It ports [Zyou
 - **Stopwatch:** start, pause, lap, and reset. Timing continues while the page is closed.
 - **Focus:** 5/15/25/45-minute presets. Timing continues while the page is closed. It has no home tile; open it from the app list.
 - **Kaboo:** token count and cost for today, 7 days or 30 days, plus the top model, received over Bluetooth LE from `tools/usage_bridge.py` on a Mac.
-- **Claude:** 5-hour and 7-day quota use with reset countdowns, received over Bluetooth LE from `tools/usage_bridge.py` on a Mac. It shows "Waiting for Mac" until the first update and marks data older than 15 minutes as stale; it never invents usage data.
+- **Claude:** 5-hour and 7-day quota use with reset countdowns, received over Bluetooth LE from `tools/usage_bridge.py` on a Mac. A window's percentage and bar use the theme color, turn yellow at 70% and red at 90%. It shows "Waiting for Mac" until the first update and marks data older than 15 minutes as stale; it never invents usage data.
 - The status bar's Wi-Fi and battery symbols are part of the UI style and do not indicate live connection or charge state. See the Battery page for the actual reading.
 
 The target board is the **FoloToy AI Passport with an ESP32-C3, 8 MB flash, no PSRAM, a 240 × 320 ST7789P3 SPI display, and three ADC buttons**. Other ESP32 boards need changes to the pins, display, and input drivers in `components/passport_bsp`.

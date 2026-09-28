@@ -40,6 +40,12 @@ static uint32_t s_focus_preset = 1;
 #define KABOO_PERIOD_COUNT  3
 #define QUOTA_BAR_W        216
 #define USAGE_WARNING_HEX  0xF09609
+/* Quota use turns from the theme color to yellow, then red, as a window
+   nears its limit. The colors are the Windows Phone yellow and red accents. */
+#define QUOTA_WARN_PCT     70
+#define QUOTA_ALERT_PCT    90
+#define QUOTA_WARN_HEX     0xE3C800
+#define QUOTA_ALERT_HEX    0xE51400
 typedef struct {
     lv_obj_t *pct;
     lv_obj_t *bar;
@@ -132,6 +138,13 @@ static void quota_row_blank(quota_row_t *row, const char *reset)
     set_text_if_changed(row->reset, reset);
 }
 
+static lv_color_t quota_color(uint8_t pct)
+{
+    if (pct >= QUOTA_ALERT_PCT) return lv_color_hex(QUOTA_ALERT_HEX);
+    if (pct >= QUOTA_WARN_PCT) return lv_color_hex(QUOTA_WARN_HEX);
+    return s_accent_color;
+}
+
 static void quota_row_show(quota_row_t *row, uint8_t pct, uint32_t resets_unix,
                            uint32_t now_unix, bool have_now, bool fresh)
 {
@@ -144,7 +157,13 @@ static void quota_row_show(quota_row_t *row, uint8_t pct, uint32_t resets_unix,
     /* Past the reset time the percentage belongs to the previous window. */
     const bool expired = have_now && usage_model_quota_expired(resets_unix, now_unix);
     const bool current = fresh && !expired;
-    set_color_if_changed(row->pct, current ? s_accent_color : s_text_color);
+    const lv_color_t color = quota_color(pct);
+    set_color_if_changed(row->pct, current ? color : s_text_color);
+    /* An old reading keeps its level color on the bar, only dimmed, so a full
+       but stale window never reads as an empty one. */
+    if (!lv_color_eq(lv_obj_get_style_bg_color(row->bar, 0), color)) {
+        lv_obj_set_style_bg_color(row->bar, color, 0);
+    }
     const lv_opa_t opa = current ? LV_OPA_COVER : LV_OPA_50;
     if (lv_obj_get_style_bg_opa(row->bar, 0) != opa) {
         lv_obj_set_style_bg_opa(row->bar, opa, 0);
