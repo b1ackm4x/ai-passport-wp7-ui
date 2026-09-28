@@ -7,7 +7,7 @@
 #include "usage_link.h"
 
 static const char *const s_titles[WP7_APP_COUNT] = {
-    "Claude", "Clock", "Battery", "Stopwatch", "Focus timer",
+    "Kaboo", "Claude", "Clock", "Battery", "Stopwatch", "Focus timer",
 };
 static const uint32_t s_focus_minutes[] = {15, 25, 45, 5};
 
@@ -32,18 +32,26 @@ static uint32_t s_stopwatch_laps;
 static bool s_stopwatch_running;
 static uint32_t s_focus_preset = 1;
 
-/* Claude page: two quota windows, each a label, percentage, bar and reset
-   line, plus one source note. Created only while the Claude page is open. */
-#define CLAUDE_SOURCE_TTL_S 900
-#define CLAUDE_BAR_W        216
-#define CLAUDE_WARNING_HEX  0xF09609
+/* Usage pages. Kaboo shows token count, cost and top model for one of three
+   periods; Claude shows two quota windows, each a label, percentage, bar and
+   reset line. Both end with a source note. Widgets exist only while the page
+   is open. */
+#define USAGE_SOURCE_TTL_S  900
+#define KABOO_PERIOD_COUNT  3
+#define QUOTA_BAR_W        216
+#define USAGE_WARNING_HEX  0xF09609
 typedef struct {
     lv_obj_t *pct;
     lv_obj_t *bar;
     lv_obj_t *reset;
 } quota_row_t;
 static quota_row_t s_quota[2];
-static lv_obj_t *s_claude_note;
+static lv_obj_t *s_note;
+static lv_obj_t *s_kaboo_periods[KABOO_PERIOD_COUNT];
+static lv_obj_t *s_kaboo_tokens;
+static lv_obj_t *s_kaboo_cost;
+static lv_obj_t *s_kaboo_model;
+static uint32_t s_kaboo_period;
 static lv_color_t s_text_color;
 static lv_color_t s_accent_color;
 static uint64_t s_focus_left_ms = 25 * 60000ULL;
@@ -130,7 +138,7 @@ static void quota_row_show(quota_row_t *row, uint8_t pct, uint32_t resets_unix,
     char text[40];
     snprintf(text, sizeof(text), "%u%%", (unsigned)pct);
     set_text_if_changed(row->pct, text);
-    const int32_t width = CLAUDE_BAR_W * pct / 100;
+    const int32_t width = QUOTA_BAR_W * pct / 100;
     if (lv_obj_get_width(row->bar) != width) lv_obj_set_width(row->bar, width);
 
     /* Past the reset time the percentage belongs to the previous window. */
@@ -161,37 +169,104 @@ static void quota_row_show(quota_row_t *row, uint8_t pct, uint32_t resets_unix,
     set_text_if_changed(row->reset, text);
 }
 
+/* Sample age is independent of receipt time: the bridge may resend an old
+   sample, so the note stays visible even while the source is fresh. */
+static bool refresh_source_note(uint32_t sampled_unix, uint32_t now_unix, bool have_now)
+{
+    const bool fresh = have_now && usage_model_source_fresh(
+        sampled_unix, now_unix, USAGE_SOURCE_TTL_S);
+    char note[32];
+    if (!have_now) {
+        snprintf(note, sizeof(note), "Update time unknown");
+    } else if (!fresh) {
+        snprintf(note, sizeof(note), "Data may be stale");
+    } else if (now_unix - sampled_unix < 60) {
+        snprintf(note, sizeof(note), "Updated <1m ago");
+    } else {
+        snprintf(note, sizeof(note), "Updated %" PRIu32 "m ago",
+                 (now_unix - sampled_unix) / 60);
+    }
+    set_text_if_changed(s_note, note);
+    set_color_if_changed(s_note, fresh ? s_text_color : lv_color_hex(USAGE_WARNING_HEX));
+    return fresh;
+}
+
+static void format_tokens(char *out, size_t size, uint64_t tokens)
+{
+    static const struct { uint64_t unit; char suffix; } scales[] = {
+        {1000000000ULL, 'B'}, {1000000ULL, 'M'}, {1000ULL, 'K'},
+    };
+    for (size_t i = 0; i < sizeof(scales) / sizeof(scales[0]); ++i) {
+        if (tokens >= scales[i].unit) {
+            snprintf(out, size, "%" PRIu64 ".%" PRIu64 "%c", tokens / scales[i].unit,
+                     tokens % scales[i].unit / (scales[i].unit / 10), scales[i].suffix);
+            return;
+        }
+    }
+    snprintf(out, size, "%" PRIu64, tokens);
+}
+
+static void refresh_kaboo(void)
+{
+    for (uint32_t i = 0; i < KABOO_PERIOD_COUNT; ++i) {
+        const lv_opa_t opa = i == s_kaboo_period ? LV_OPA_COVER : LV_OPA_40;
+        if (lv_obj_get_style_text_opa(s_kaboo_periods[i], 0) != opa) {
+            lv_obj_set_style_text_opa(s_kaboo_periods[i], opa, 0);
+        }
+    }
+
+    usage_snapshot_t snap;
+    const bool have = usage_link_get(&snap, NULL);
+    if (!have || !(snap.flags & USAGE_FLAG_KABOO_VALID)) {
+        set_text_if_changed(s_kaboo_tokens, "--");
+        set_text_if_changed(s_kaboo_cost, "--");
+        set_text_if_changed(s_kaboo_model, "--");
+        set_text_if_changed(s_note, have ? "No Kaboo data" : "Waiting for Mac");
+        set_color_if_changed(s_note, lv_color_hex(USAGE_WARNING_HEX));
+        return;
+    }
+
+    uint64_t tokens = snap.today_tokens;
+    uint32_t cents = snap.today_cost_cents;
+    if (s_kaboo_period == 1) {
+        tokens = snap.week_tokens;
+        cents = snap.week_cost_cents;
+    } else if (s_kaboo_period == 2) {
+        tokens = snap.month_tokens;
+        cents = snap.month_cost_cents;
+    }
+    char text[32];
+    format_tokens(text, sizeof(text), tokens);
+    set_text_if_changed(s_kaboo_tokens, text);
+    snprintf(text, sizeof(text), "$%" PRIu32 ".%02" PRIu32, cents / 100, cents % 100);
+    set_text_if_changed(s_kaboo_cost, text);
+    set_text_if_changed(s_kaboo_model, snap.top_model[0] ? snap.top_model : "--");
+
+    uint32_t now_unix = 0;
+    const bool have_now = usage_model_now_unix(&snap, true, esp_timer_get_time(),
+                                               &now_unix);
+    /* A stale source must not pass its old numbers off as current. */
+    const bool fresh = refresh_source_note(snap.kaboo_sampled_unix, now_unix, have_now);
+    set_color_if_changed(s_kaboo_tokens, fresh ? s_accent_color : s_text_color);
+}
+
 static void refresh_claude(void)
 {
     usage_snapshot_t snap;
     const bool have = usage_link_get(&snap, NULL);
-    const lv_color_t warning = lv_color_hex(CLAUDE_WARNING_HEX);
+    const lv_color_t warning = lv_color_hex(USAGE_WARNING_HEX);
     if (!have || !(snap.flags & USAGE_FLAG_CLAUDE_VALID)) {
         quota_row_blank(&s_quota[0], "");
         quota_row_blank(&s_quota[1], "");
-        set_text_if_changed(s_claude_note, have ? "No quota data" : "Waiting for Mac");
-        set_color_if_changed(s_claude_note, warning);
+        set_text_if_changed(s_note, have ? "No quota data" : "Waiting for Mac");
+        set_color_if_changed(s_note, warning);
         return;
     }
 
     uint32_t now_unix = 0;
     const bool have_now = usage_model_now_unix(&snap, true, esp_timer_get_time(),
                                                &now_unix);
-    const bool fresh = have_now && usage_model_source_fresh(
-        snap.claude_sampled_unix, now_unix, CLAUDE_SOURCE_TTL_S);
-    char note[32];
-    if (!have_now) {
-        snprintf(note, sizeof(note), "Update time unknown");
-    } else if (!fresh) {
-        snprintf(note, sizeof(note), "Data may be stale");
-    } else if (now_unix - snap.claude_sampled_unix < 60) {
-        snprintf(note, sizeof(note), "Updated <1m ago");
-    } else {
-        snprintf(note, sizeof(note), "Updated %" PRIu32 "m ago",
-                 (now_unix - snap.claude_sampled_unix) / 60);
-    }
-    set_text_if_changed(s_claude_note, note);
-    set_color_if_changed(s_claude_note, fresh ? s_text_color : warning);
+    const bool fresh = refresh_source_note(snap.claude_sampled_unix, now_unix, have_now);
 
     /* Claude Code reports a window only while it is active; show a missing
        window as inactive rather than as 0%. */
@@ -225,13 +300,13 @@ static void create_quota_row(quota_row_t *row, int32_t y, const char *name,
 {
     lv_label_set_text(panel_label(12, y + 4, &lv_font_montserrat_16, text), name);
     row->pct = panel_label(12, y, &lv_font_montserrat_22, accent);
-    lv_obj_set_width(row->pct, CLAUDE_BAR_W);
+    lv_obj_set_width(row->pct, QUOTA_BAR_W);
     lv_obj_set_style_text_align(row->pct, LV_TEXT_ALIGN_RIGHT, 0);
 
     lv_obj_t *track = lv_obj_create(s_panel);
     lv_obj_remove_style_all(track);
     lv_obj_set_pos(track, 12, y + 32);
-    lv_obj_set_size(track, CLAUDE_BAR_W, 8);
+    lv_obj_set_size(track, QUOTA_BAR_W, 8);
     lv_obj_set_style_bg_color(track, text, 0);
     lv_obj_set_style_bg_opa(track, LV_OPA_20, 0);
     lv_obj_remove_flag(track, LV_OBJ_FLAG_SCROLLABLE);
@@ -257,6 +332,10 @@ static void refresh(lv_timer_t *timer)
     if (!s_panel) return;
 
     switch (s_app) {
+        case WP7_APP_KABOO:
+            refresh_kaboo();
+            set_text_if_changed(s_hint, "UP/DOWN  Period\nHOLD OK  Back");
+            return;
         case WP7_APP_CLAUDE:
             refresh_claude();
             set_text_if_changed(s_hint, "HOLD OK  Back");
@@ -348,12 +427,37 @@ bool wp7_apps_open(lv_obj_t *screen, wp7_app_id_t app, int32_t status_h,
     lv_obj_set_style_bg_color(stripe, accent, 0);
     lv_obj_set_style_bg_opa(stripe, LV_OPA_COVER, 0);
 
-    if (app == WP7_APP_CLAUDE) {
-        s_text_color = text;
-        s_accent_color = accent;
+    s_text_color = text;
+    s_accent_color = accent;
+    if (app == WP7_APP_KABOO) {
+        static const char *const periods[KABOO_PERIOD_COUNT] = {
+            "today", "7 days", "30 days",
+        };
+        int32_t x = 12;
+        for (uint32_t i = 0; i < KABOO_PERIOD_COUNT; ++i) {
+            s_kaboo_periods[i] = panel_label(x, 70, &lv_font_montserrat_16, text);
+            lv_label_set_text(s_kaboo_periods[i], periods[i]);
+            lv_obj_update_layout(s_kaboo_periods[i]);
+            x += lv_obj_get_width(s_kaboo_periods[i]) + 16;
+        }
+        lv_label_set_text(panel_label(12, 108, &lv_font_montserrat_16, text), "Tokens");
+        s_kaboo_tokens = panel_label(12, 104, &lv_font_montserrat_22, accent);
+        lv_label_set_text(panel_label(12, 142, &lv_font_montserrat_16, text), "Cost");
+        s_kaboo_cost = panel_label(12, 138, &lv_font_montserrat_22, text);
+        lv_obj_set_width(s_kaboo_tokens, width - 24);
+        lv_obj_set_width(s_kaboo_cost, width - 24);
+        lv_obj_set_style_text_align(s_kaboo_tokens, LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_set_style_text_align(s_kaboo_cost, LV_TEXT_ALIGN_RIGHT, 0);
+        lv_label_set_text(panel_label(12, 174, &lv_font_montserrat_14, text), "Top model");
+        s_kaboo_model = panel_label(12, 192, &lv_font_montserrat_16, text);
+        lv_obj_set_width(s_kaboo_model, width - 24);
+        lv_obj_set_height(s_kaboo_model, lv_font_montserrat_16.line_height);
+        lv_label_set_long_mode(s_kaboo_model, LV_LABEL_LONG_DOT);
+        s_note = panel_label(12, 218, &lv_font_montserrat_14, text);
+    } else if (app == WP7_APP_CLAUDE) {
         create_quota_row(&s_quota[0], 70, "5-hour", text, accent);
         create_quota_row(&s_quota[1], 144, "7-day", text, accent);
-        s_claude_note = panel_label(12, 218, &lv_font_montserrat_14, text);
+        s_note = panel_label(12, 218, &lv_font_montserrat_14, text);
     } else {
         s_value = lv_label_create(s_panel);
         lv_obj_set_style_text_font(s_value, &lv_font_montserrat_22, 0);
@@ -382,7 +486,8 @@ void wp7_apps_close(void)
     if (!s_panel) return;
     lv_obj_delete(s_panel);
     s_panel = s_title = s_value = s_detail = s_hint = NULL;
-    s_claude_note = NULL;
+    s_note = s_kaboo_tokens = s_kaboo_cost = s_kaboo_model = NULL;
+    memset(s_kaboo_periods, 0, sizeof(s_kaboo_periods));
     memset(s_quota, 0, sizeof(s_quota));
 }
 
@@ -394,7 +499,10 @@ bool wp7_apps_active(void)
 void wp7_apps_key(wp7_key_t key, bool long_press)
 {
     const uint64_t now = now_ms();
-    if (s_app == WP7_APP_CLOCK) {
+    if (s_app == WP7_APP_KABOO && !long_press && key != WP7_KEY_OK) {
+        s_kaboo_period = (s_kaboo_period + (key == WP7_KEY_DOWN ? 1 : KABOO_PERIOD_COUNT - 1)) %
+                         KABOO_PERIOD_COUNT;
+    } else if (s_app == WP7_APP_CLOCK) {
         if (key == WP7_KEY_UP || key == WP7_KEY_DOWN) {
             const uint64_t local = s_clock_known ? clock_local_seconds(now) : 0;
             const uint64_t step = key == WP7_KEY_UP ?

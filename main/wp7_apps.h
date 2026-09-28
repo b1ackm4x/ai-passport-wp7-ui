@@ -6,6 +6,7 @@
 #include "wp7_ui.h"
 
 typedef enum {
+    WP7_APP_KABOO,
     WP7_APP_CLAUDE,
     WP7_APP_CLOCK,
     WP7_APP_BATTERY,

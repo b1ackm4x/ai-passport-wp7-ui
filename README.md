@@ -14,7 +14,8 @@ A standalone ESP-IDF application for the **FoloToy AI Passport**. It ports [Zyou
 - **Clock:** set the time with buttons. Time must be set again after power loss; the status bar displays `--:--` until then.
 - **Battery:** reads state of charge and cell voltage from the onboard CW2017 gauge; reports unavailable when it cannot read the sensor.
 - **Stopwatch:** start, pause, lap, and reset. Timing continues while the page is closed.
-- **Focus:** 5/15/25/45-minute presets. Timing continues while the page is closed.
+- **Focus:** 5/15/25/45-minute presets. Timing continues while the page is closed. It has no home tile; open it from the app list.
+- **Kaboo:** token count and cost for today, 7 days or 30 days, plus the top model, received over Bluetooth LE from `tools/usage_bridge.py` on a Mac.
 - **Claude:** 5-hour and 7-day quota use with reset countdowns, received over Bluetooth LE from `tools/usage_bridge.py` on a Mac. It shows "Waiting for Mac" until the first update and marks data older than 15 minutes as stale; it never invents usage data.
 - The status bar's Wi-Fi and battery symbols are part of the UI style and do not indicate live connection or charge state. See the Battery page for the actual reading.
 
@@ -36,6 +37,7 @@ These two 240 × 320 PNGs were reconstructed from actual display updates over th
 | App list | Select an item | — | Open the item | Return to tiles |
 | UI Settings | Select a control | — | Change the control | Return with the upstream exit transition |
 | Clock | Add 1 hour / 1 minute | Add 6 hours / 10 minutes | — | Return |
+| Kaboo | Change period | — | — | Return |
 | Claude | — | — | — | Return |
 | Stopwatch | Lap / reset while paused | — | Start / pause | Return |
 | Focus | Change preset / reset while paused | — | Start / pause | Return |
@@ -64,7 +66,7 @@ A thin outline marks the selected control because the Passport has no touchscree
 
 This repository's partition table targets the Passport layout already verified for this port. Check the layout first on another hardware batch or a device with changed partitions. A full `idf.py flash` also writes the bootloader and partition table; use it only on a dedicated development board or after confirming that layout is appropriate. Generated `build/`, `managed_components/`, and local `sdkconfig` files are not committed; `sdkconfig.defaults` supplies the project settings.
 
-## Send Claude usage from a Mac
+## Send Kaboo and Claude usage from a Mac
 
 The firmware advertises as `FoloPassport`. On a Mac with Bluetooth, install `bleak` (`pip install 'bleak>=0.19'`) and run:
 
@@ -73,7 +75,7 @@ python3 tools/usage_bridge.py --once   # one update, then exit
 python3 tools/usage_bridge.py          # update every 60 s
 ```
 
-The bridge reads the local Claude Code quota snapshots described at the top of the script. `--dry-run` prints the packed payload without Bluetooth.
+The bridge reads the local Kaboo and Claude Code snapshots described at the top of the script. Both pages show "Waiting for Mac" until the first update and mark data older than 15 minutes as stale. `--dry-run` prints the packed payload without Bluetooth.
 
 ## Capture the physical display
 
@@ -92,7 +94,7 @@ When the script prints `Serial ready`, check the display and press Enter. It rec
 | --- | --- | --- |
 | [ZyoungInc/JC4880P443C_BSP `wp7`](https://github.com/ZyoungInc/JC4880P443C_BSP/tree/wp7) | WP7 pages, theme, animations, and settings structure in `main/wp7_ui.c` | Based on commit `9d1743a`; original file marks `SPDX-License-Identifier: Apache-2.0`; see the [porting notes](UPSTREAM.md) |
 | [FoloToy/ai-passport](https://github.com/FoloToy/ai-passport) | Passport display, button, I²C, and battery code in `components/passport_bsp` | Upstream repository uses the MIT License; this is a reduced and adapted copy |
-| [klchai/ai-passport-liquid-glass-ui](https://github.com/klchai/ai-passport-liquid-glass-ui) | Claude usage protocol and Bluetooth LE link in `main/usage_model.*`, `main/usage_link.*`, `tools/usage_bridge.py` and `tests/test_usage_model.c` | MIT License (FoloToy), text in `LICENSES/FoloToy-MIT.txt`; see the [porting notes](UPSTREAM.md) |
+| [klchai/ai-passport-liquid-glass-ui](https://github.com/klchai/ai-passport-liquid-glass-ui) | Kaboo and Claude usage protocol and Bluetooth LE link in `main/usage_model.*`, `main/usage_link.*`, `tools/usage_bridge.py` and `tests/test_usage_model.c` | MIT License (FoloToy), text in `LICENSES/FoloToy-MIT.txt`; see the [porting notes](UPSTREAM.md) |
 | [LVGL](https://github.com/lvgl/lvgl), [ESP-IDF](https://github.com/espressif/esp-idf), [esp_lvgl_port](https://components.espressif.com/components/espressif/esp_lvgl_port) | Graphics, system, and display-port dependencies | Fetched by the ESP-IDF component manager; downloaded component sources are not committed |
 
 **No repository-wide license has been selected yet.** The license notes above apply to their respective source material and do not assign Apache-2.0 or MIT to the whole repository. A license for the new code and an upstream-license review are still needed before public release. See [UPSTREAM.md](UPSTREAM.md) for the exact porting changes.

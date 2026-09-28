@@ -21,7 +21,9 @@
   the palette smaller so sliders and swatches no longer cover text.
 - Replaced numbered tiles and demo list entries with named applications; added
   Passport pages and the onboard CW2017 battery gauge. The former AI Usage
-  entry is now the Claude quota page, fed over Bluetooth LE.
+  entry is now two pages, Kaboo token usage and Claude quota, fed over
+  Bluetooth LE. They take the first two home tiles; Focus moved to the app
+  list only.
 - The original demo is not a phone OS; the Passport build adds functional
   pages for the five non-settings app rows.
 
