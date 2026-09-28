@@ -6,6 +6,8 @@
 #include "bsp_battery.h"
 #include "bsp_display.h"
 #include "wp7_capture.h"
+#include "usage_link.h"
+#include "esp_heap_caps.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -81,7 +83,15 @@ void app_main(void)
         battery_update_t unavailable = { .soc = -1, .mv = -1 };
         xQueueOverwrite(s_battery_updates, &unavailable);
     }
-    ESP_LOGI(TAG, "WP7 launcher ready, 240x320 RGB565");
+    /* BLE starts after the UI has initialized NVS. A failure leaves the
+       Claude page in its "Waiting for Mac" state; the launcher still works. */
+    const esp_err_t ble_err = usage_link_start();
+    if (ble_err != ESP_OK) {
+        ESP_LOGE(TAG, "BLE link unavailable: %s", esp_err_to_name(ble_err));
+    }
+    ESP_LOGI(TAG, "WP7 launcher ready, 240x320 RGB565, heap free=%u largest=%u",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 
     input_event_t input;
     battery_update_t battery;

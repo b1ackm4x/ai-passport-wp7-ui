@@ -18,11 +18,18 @@
 - Passport 设置页以 16/22 像素字体的实际行高安排文字框，并缩小主题色块；
   避免原比例缩放后文字被滑块或色块覆盖。
 - 将数字磁贴与演示列表替换为实际应用名称；新增 Passport 功能页和板载
-  CW2017 电量计读取。AI 用量入口尚未接入账户数据。
+  CW2017 电量计读取。原 AI Usage 入口已改为 Claude 额度页，数据通过低功耗蓝牙接收。
 - 原版是界面演示，不是手机操作系统；Passport 版为五个应用列表项新增了
   对应功能页。
 
 ## 代码来源与许可边界
+
+- `main/usage_model.*`、`main/usage_link.*`、`tools/usage_bridge.py` 与
+  `tests/test_usage_model.c` 来自
+  [klchai/ai-passport-liquid-glass-ui](https://github.com/klchai/ai-passport-liquid-glass-ui)
+  （MIT License，FoloToy；许可全文与 `LICENSES/FoloToy-MIT.txt` 相同）。唯一改动在
+  `usage_link.c`：校验数据包所用的时间基准改为本次开机最近一次接收的数据包，
+  不再依赖原项目的 `time_sync` 模块，因此不链接 Wi-Fi 与 SNTP。
 
 - `components/passport_bsp/` 从 [FoloToy/ai-passport](https://github.com/FoloToy/ai-passport)
   的 `components/bsp/` 精简、适配而来；核对时的基础提交为

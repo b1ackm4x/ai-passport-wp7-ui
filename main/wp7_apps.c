@@ -4,9 +4,10 @@
 #include <stdio.h>
 #include <string.h>
 #include "esp_timer.h"
+#include "usage_link.h"
 
 static const char *const s_titles[WP7_APP_COUNT] = {
-    "AI Usage", "Clock", "Battery", "Stopwatch", "Focus timer",
+    "Claude", "Clock", "Battery", "Stopwatch", "Focus timer",
 };
 static const uint32_t s_focus_minutes[] = {15, 25, 45, 5};
 
@@ -30,6 +31,21 @@ static uint64_t s_stopwatch_lap_ms;
 static uint32_t s_stopwatch_laps;
 static bool s_stopwatch_running;
 static uint32_t s_focus_preset = 1;
+
+/* Claude page: two quota windows, each a label, percentage, bar and reset
+   line, plus one source note. Created only while the Claude page is open. */
+#define CLAUDE_SOURCE_TTL_S 900
+#define CLAUDE_BAR_W        216
+#define CLAUDE_WARNING_HEX  0xF09609
+typedef struct {
+    lv_obj_t *pct;
+    lv_obj_t *bar;
+    lv_obj_t *reset;
+} quota_row_t;
+static quota_row_t s_quota[2];
+static lv_obj_t *s_claude_note;
+static lv_color_t s_text_color;
+static lv_color_t s_accent_color;
 static uint64_t s_focus_left_ms = 25 * 60000ULL;
 static uint64_t s_focus_start_ms;
 static bool s_focus_running;
@@ -93,6 +109,142 @@ static void format_mmss(char *out, size_t size, uint64_t ms, bool centiseconds)
     }
 }
 
+static void set_color_if_changed(lv_obj_t *obj, lv_color_t color)
+{
+    if (obj && !lv_color_eq(lv_obj_get_style_text_color(obj, 0), color)) {
+        lv_obj_set_style_text_color(obj, color, 0);
+    }
+}
+
+static void quota_row_blank(quota_row_t *row, const char *reset)
+{
+    set_text_if_changed(row->pct, "--");
+    set_color_if_changed(row->pct, s_text_color);
+    if (lv_obj_get_width(row->bar) != 0) lv_obj_set_width(row->bar, 0);
+    set_text_if_changed(row->reset, reset);
+}
+
+static void quota_row_show(quota_row_t *row, uint8_t pct, uint32_t resets_unix,
+                           uint32_t now_unix, bool have_now, bool fresh)
+{
+    char text[40];
+    snprintf(text, sizeof(text), "%u%%", (unsigned)pct);
+    set_text_if_changed(row->pct, text);
+    const int32_t width = CLAUDE_BAR_W * pct / 100;
+    if (lv_obj_get_width(row->bar) != width) lv_obj_set_width(row->bar, width);
+
+    /* Past the reset time the percentage belongs to the previous window. */
+    const bool expired = have_now && usage_model_quota_expired(resets_unix, now_unix);
+    const bool current = fresh && !expired;
+    set_color_if_changed(row->pct, current ? s_accent_color : s_text_color);
+    const lv_opa_t opa = current ? LV_OPA_COVER : LV_OPA_50;
+    if (lv_obj_get_style_bg_opa(row->bar, 0) != opa) {
+        lv_obj_set_style_bg_opa(row->bar, opa, 0);
+    }
+
+    if (!have_now) {
+        text[0] = '\0';
+    } else if (expired) {
+        snprintf(text, sizeof(text), "Awaiting update");
+    } else {
+        const uint32_t left = usage_model_seconds_until(resets_unix, now_unix);
+        if (left >= 86400) {
+            snprintf(text, sizeof(text), "Resets in %" PRIu32 "d %" PRIu32 "h",
+                     left / 86400, left % 86400 / 3600);
+        } else if (left >= 3600) {
+            snprintf(text, sizeof(text), "Resets in %" PRIu32 "h %" PRIu32 "m",
+                     left / 3600, left % 3600 / 60);
+        } else {
+            snprintf(text, sizeof(text), "Resets in %" PRIu32 "m", left / 60);
+        }
+    }
+    set_text_if_changed(row->reset, text);
+}
+
+static void refresh_claude(void)
+{
+    usage_snapshot_t snap;
+    const bool have = usage_link_get(&snap, NULL);
+    const lv_color_t warning = lv_color_hex(CLAUDE_WARNING_HEX);
+    if (!have || !(snap.flags & USAGE_FLAG_CLAUDE_VALID)) {
+        quota_row_blank(&s_quota[0], "");
+        quota_row_blank(&s_quota[1], "");
+        set_text_if_changed(s_claude_note, have ? "No quota data" : "Waiting for Mac");
+        set_color_if_changed(s_claude_note, warning);
+        return;
+    }
+
+    uint32_t now_unix = 0;
+    const bool have_now = usage_model_now_unix(&snap, true, esp_timer_get_time(),
+                                               &now_unix);
+    const bool fresh = have_now && usage_model_source_fresh(
+        snap.claude_sampled_unix, now_unix, CLAUDE_SOURCE_TTL_S);
+    char note[32];
+    if (!have_now) {
+        snprintf(note, sizeof(note), "Update time unknown");
+    } else if (!fresh) {
+        snprintf(note, sizeof(note), "Data may be stale");
+    } else if (now_unix - snap.claude_sampled_unix < 60) {
+        snprintf(note, sizeof(note), "Updated <1m ago");
+    } else {
+        snprintf(note, sizeof(note), "Updated %" PRIu32 "m ago",
+                 (now_unix - snap.claude_sampled_unix) / 60);
+    }
+    set_text_if_changed(s_claude_note, note);
+    set_color_if_changed(s_claude_note, fresh ? s_text_color : warning);
+
+    /* Claude Code reports a window only while it is active; show a missing
+       window as inactive rather than as 0%. */
+    if (snap.flags & USAGE_FLAG_FIVE_HOUR) {
+        quota_row_show(&s_quota[0], snap.five_hour_pct, snap.five_hour_resets_unix,
+                       now_unix, have_now, fresh);
+    } else {
+        quota_row_blank(&s_quota[0], "Not active");
+    }
+    if (snap.flags & USAGE_FLAG_SEVEN_DAY) {
+        quota_row_show(&s_quota[1], snap.seven_day_pct, snap.seven_day_resets_unix,
+                       now_unix, have_now, fresh);
+    } else {
+        quota_row_blank(&s_quota[1], "Not active");
+    }
+}
+
+static lv_obj_t *panel_label(int32_t x, int32_t y, const lv_font_t *font,
+                             lv_color_t color)
+{
+    lv_obj_t *label = lv_label_create(s_panel);
+    lv_label_set_text(label, "");
+    lv_obj_set_style_text_font(label, font, 0);
+    lv_obj_set_style_text_color(label, color, 0);
+    lv_obj_set_pos(label, x, y);
+    return label;
+}
+
+static void create_quota_row(quota_row_t *row, int32_t y, const char *name,
+                             lv_color_t text, lv_color_t accent)
+{
+    lv_label_set_text(panel_label(12, y + 4, &lv_font_montserrat_16, text), name);
+    row->pct = panel_label(12, y, &lv_font_montserrat_22, accent);
+    lv_obj_set_width(row->pct, CLAUDE_BAR_W);
+    lv_obj_set_style_text_align(row->pct, LV_TEXT_ALIGN_RIGHT, 0);
+
+    lv_obj_t *track = lv_obj_create(s_panel);
+    lv_obj_remove_style_all(track);
+    lv_obj_set_pos(track, 12, y + 32);
+    lv_obj_set_size(track, CLAUDE_BAR_W, 8);
+    lv_obj_set_style_bg_color(track, text, 0);
+    lv_obj_set_style_bg_opa(track, LV_OPA_20, 0);
+    lv_obj_remove_flag(track, LV_OBJ_FLAG_SCROLLABLE);
+
+    row->bar = lv_obj_create(track);
+    lv_obj_remove_style_all(row->bar);
+    lv_obj_set_size(row->bar, 0, 8);
+    lv_obj_set_style_bg_color(row->bar, accent, 0);
+    lv_obj_set_style_bg_opa(row->bar, LV_OPA_COVER, 0);
+
+    row->reset = panel_label(12, y + 46, &lv_font_montserrat_14, text);
+}
+
 static void refresh(lv_timer_t *timer)
 {
     (void)timer;
@@ -105,12 +257,10 @@ static void refresh(lv_timer_t *timer)
     if (!s_panel) return;
 
     switch (s_app) {
-        case WP7_APP_AI_QUOTA: {
-            snprintf(value, sizeof(value), "Not set up");
-            snprintf(detail, sizeof(detail), "AI quota source can be added later.");
+        case WP7_APP_CLAUDE:
+            refresh_claude();
             set_text_if_changed(s_hint, "HOLD OK  Back");
-            break;
-        }
+            return;
         case WP7_APP_CLOCK:
             format_clock(value, sizeof(value), now, true);
             snprintf(detail, sizeof(detail), "%s\nTime resets when power is lost.",
@@ -198,17 +348,25 @@ bool wp7_apps_open(lv_obj_t *screen, wp7_app_id_t app, int32_t status_h,
     lv_obj_set_style_bg_color(stripe, accent, 0);
     lv_obj_set_style_bg_opa(stripe, LV_OPA_COVER, 0);
 
-    s_value = lv_label_create(s_panel);
-    lv_obj_set_style_text_font(s_value, &lv_font_montserrat_22, 0);
-    lv_obj_set_style_text_color(s_value, accent, 0);
-    lv_obj_set_pos(s_value, 12, 78);
-    lv_obj_set_width(s_value, width - 24);
+    if (app == WP7_APP_CLAUDE) {
+        s_text_color = text;
+        s_accent_color = accent;
+        create_quota_row(&s_quota[0], 70, "5-hour", text, accent);
+        create_quota_row(&s_quota[1], 144, "7-day", text, accent);
+        s_claude_note = panel_label(12, 218, &lv_font_montserrat_14, text);
+    } else {
+        s_value = lv_label_create(s_panel);
+        lv_obj_set_style_text_font(s_value, &lv_font_montserrat_22, 0);
+        lv_obj_set_style_text_color(s_value, accent, 0);
+        lv_obj_set_pos(s_value, 12, 78);
+        lv_obj_set_width(s_value, width - 24);
 
-    s_detail = lv_label_create(s_panel);
-    lv_obj_set_style_text_font(s_detail, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(s_detail, text, 0);
-    lv_obj_set_pos(s_detail, 12, 124);
-    lv_obj_set_width(s_detail, width - 24);
+        s_detail = lv_label_create(s_panel);
+        lv_obj_set_style_text_font(s_detail, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(s_detail, text, 0);
+        lv_obj_set_pos(s_detail, 12, 124);
+        lv_obj_set_width(s_detail, width - 24);
+    }
 
     s_hint = lv_label_create(s_panel);
     lv_obj_set_style_text_font(s_hint, &lv_font_montserrat_14, 0);
@@ -224,6 +382,8 @@ void wp7_apps_close(void)
     if (!s_panel) return;
     lv_obj_delete(s_panel);
     s_panel = s_title = s_value = s_detail = s_hint = NULL;
+    s_claude_note = NULL;
+    memset(s_quota, 0, sizeof(s_quota));
 }
 
 bool wp7_apps_active(void)

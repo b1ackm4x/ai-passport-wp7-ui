@@ -20,12 +20,20 @@
 - Sized Passport settings labels to their 16/22 px font line heights and made
   the palette smaller so sliders and swatches no longer cover text.
 - Replaced numbered tiles and demo list entries with named applications; added
-  Passport pages and the onboard CW2017 battery gauge. The AI usage entry does
-  not yet have an account data source.
+  Passport pages and the onboard CW2017 battery gauge. The former AI Usage
+  entry is now the Claude quota page, fed over Bluetooth LE.
 - The original demo is not a phone OS; the Passport build adds functional
   pages for the five non-settings app rows.
 
 ## Source and license boundaries
+
+- `main/usage_model.*`, `main/usage_link.*`, `tools/usage_bridge.py` and
+  `tests/test_usage_model.c` come from
+  [klchai/ai-passport-liquid-glass-ui](https://github.com/klchai/ai-passport-liquid-glass-ui)
+  (MIT License, FoloToy; same text as `LICENSES/FoloToy-MIT.txt`). The only
+  change is in `usage_link.c`: the time base for payload validation is the
+  last packet accepted during this boot instead of that project's `time_sync`
+  module, so Wi-Fi and SNTP are not linked.
 
 - `components/passport_bsp/` is a reduced, adapted copy of
   [`components/bsp/` from FoloToy/ai-passport](https://github.com/FoloToy/ai-passport).

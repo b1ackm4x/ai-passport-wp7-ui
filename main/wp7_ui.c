@@ -989,7 +989,7 @@ static void update_wp7_switch_accent(lv_obj_t *sw)
 static void set_tile_number(wp7_tile_t *tile, int32_t page, int32_t index)
 {
     static const char *const names[] = {
-        "AI\nUsage", "Clock", "Battery", "Stopwatch", "Focus", "UI\nSettings",
+        "Claude", "Clock", "Battery", "Stopwatch", "Focus", "UI\nSettings",
     };
     if (tile->label_page == page && tile->label_index == index) {
         return;
@@ -3517,7 +3517,7 @@ static void create_tile_grid(lv_obj_t *screen, int32_t screen_w, int32_t screen_
 static void create_list_page(lv_obj_t *screen, int32_t screen_w, int32_t screen_h, int32_t status_h)
 {
     static const char * const item_labels[] = {
-        "AI Usage",
+        "Claude",
         "Clock",
         "Battery",
         "Stopwatch",

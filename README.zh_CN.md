@@ -15,7 +15,7 @@
 - **Battery**：读取板载 CW2017 电量计的百分比与电压；读取失败时显示不可用。
 - **Stopwatch**：开始、暂停、记圈与重置；退出页面后仍继续计时。
 - **Focus**：可选 5／15／25／45 分钟计时；退出页面后仍继续计时。
-- **AI Usage**：预留入口，目前没有连接账户或额度接口，也不会显示虚构用量。
+- **Claude**：显示 5 小时与 7 天额度用量及重置倒计时，数据由 Mac 上的 `tools/usage_bridge.py` 通过低功耗蓝牙推送。首次收到数据前显示 "Waiting for Mac"，超过 15 分钟未更新的数据标为过期；不会显示虚构用量。
 - 状态栏的 Wi-Fi 和电池图标沿用界面样式，不代表实际连接状态或实时电量；实际电量请看 Battery 页面。
 
 目标硬件是 **ESP32-C3、8 MB Flash、无 PSRAM、ST7789P3 240 × 320 SPI 屏、三键 ADC 输入** 的 FoloToy AI Passport。其他 ESP32 板卡需要调整 `components/passport_bsp` 中的引脚、显示与输入驱动。
@@ -36,6 +36,7 @@
 | 应用列表 | 选择项目 | — | 打开项目 | 返回磁贴 |
 | UI Settings | 选择控件 | — | 修改控件 | 返回，播放原版退场动画 |
 | Clock | 加 1 小时／加 1 分钟 | 加 6 小时／加 10 分钟 | — | 返回 |
+| Claude | — | — | — | 返回 |
 | Stopwatch | 记圈／暂停时重置 | — | 开始／暂停 | 返回 |
 | Focus | 暂停时换时长／重置 | — | 开始／暂停 | 返回 |
 
@@ -63,6 +64,17 @@
 
 本仓库的分区表针对已验证的 Passport 布局。其他批次或已经改过分区的设备，应先核对布局；不能仅凭屏幕和芯片型号就刷入。完整 `idf.py flash` 还会写入引导程序和分区表，请只在专用开发板或确认需要该布局时使用。`build/`、`managed_components/` 与本机 `sdkconfig` 均不入库，构建配置以 `sdkconfig.defaults` 为准。
 
+## 从 Mac 发送 Claude 用量
+
+固件以 `FoloPassport` 名称广播。在带蓝牙的 Mac 上安装 `bleak`（`pip install 'bleak>=0.19'`）后运行：
+
+```sh
+python3 tools/usage_bridge.py --once   # 推送一次后退出
+python3 tools/usage_bridge.py          # 每 60 秒推送一次
+```
+
+脚本读取本机 Claude Code 的额度快照，数据来源见脚本开头的说明。`--dry-run` 只打印打包结果，不使用蓝牙。
+
 ## 从实体屏幕截图
 
 固件通过 USB 串口提供只读截图命令。让设备停在目标页面后运行：
@@ -80,6 +92,7 @@ python tools/capture_wp7.py --port PORT \
 | --- | --- | --- |
 | [ZyoungInc/JC4880P443C_BSP `wp7`](https://github.com/ZyoungInc/JC4880P443C_BSP/tree/wp7) | `main/wp7_ui.c` 的 WP7 页面、主题、动画和设置结构 | 基于提交 `9d1743a`；原文件标注 `SPDX-License-Identifier: Apache-2.0`；见 [移植记录](UPSTREAM.zh_CN.md) |
 | [FoloToy/ai-passport](https://github.com/FoloToy/ai-passport) | `components/passport_bsp` 的 Passport 显示、按键、I²C、电量计代码 | 原仓库 MIT License；本仓库为精简与适配版本 |
+| [klchai/ai-passport-liquid-glass-ui](https://github.com/klchai/ai-passport-liquid-glass-ui) | `main/usage_model.*`、`main/usage_link.*`、`tools/usage_bridge.py` 与 `tests/test_usage_model.c` 中的 Claude 用量协议和低功耗蓝牙链路 | MIT License（FoloToy），全文见 `LICENSES/FoloToy-MIT.txt`；详见[移植说明](UPSTREAM.zh_CN.md) |
 | [LVGL](https://github.com/lvgl/lvgl)、[ESP-IDF](https://github.com/espressif/esp-idf)、[esp_lvgl_port](https://components.espressif.com/components/espressif/esp_lvgl_port) | 图形、系统与显示移植依赖 | 通过 ESP-IDF 组件管理器获取；不将下载的组件代码入库 |
 
 本仓库**尚未选择整体项目许可证**。上述许可证说明仅适用于对应来源文件，不能理解为整个仓库已经采用 Apache-2.0 或 MIT；正式公开发布前需要确定新增代码的授权并复核上游许可。具体移植改动见 [UPSTREAM.zh_CN.md](UPSTREAM.zh_CN.md)。
