@@ -24,7 +24,7 @@
 #define WP7_MAX_ROWS                 4
 #define WP7_MAX_TILES                (WP7_COLUMNS * WP7_MAX_ROWS)
 #define WP7_MAX_LIST_ITEMS           (WP7_MAX_TILES + 1)
-#define WP7_LIST_UI_SETTINGS_INDEX   5
+#define WP7_LIST_UI_SETTINGS_INDEX   6
 #define WP7_STATUS_BAR_PERMILLE      50
 #define WP7_SCREEN_PAD_PERMILLE      34
 #define WP7_TILE_GAP_PERMILLE        34
@@ -989,7 +989,7 @@ static void update_wp7_switch_accent(lv_obj_t *sw)
 static void set_tile_number(wp7_tile_t *tile, int32_t page, int32_t index)
 {
     static const char *const names[] = {
-        "AI\nUsage", "Clock", "Battery", "Stopwatch", "Focus", "UI\nSettings",
+        "Kaboo", "Claude", "Clock", "Battery", "Stopwatch", "UI\nSettings",
     };
     if (tile->label_page == page && tile->label_index == index) {
         return;
@@ -3424,7 +3424,8 @@ static void create_status_bar(lv_obj_t *screen, int32_t screen_w, int32_t status
     s_wp7.status_time_label = time_label;
 
     lv_obj_t *battery_label = lv_label_create(bar);
-    lv_label_set_text(battery_label, LV_SYMBOL_BATTERY_3);
+    /* Blank until the fuel gauge reports; see wp7_ui_set_battery(). */
+    lv_label_set_text(battery_label, "");
     lv_obj_set_style_text_color(battery_label, ui_text_color(), 0);
     lv_obj_set_style_text_font(battery_label, &lv_font_montserrat_14, 0);
     lv_obj_align(battery_label, LV_ALIGN_RIGHT_MID, -pad, 0);
@@ -3517,7 +3518,8 @@ static void create_tile_grid(lv_obj_t *screen, int32_t screen_w, int32_t screen_
 static void create_list_page(lv_obj_t *screen, int32_t screen_w, int32_t screen_h, int32_t status_h)
 {
     static const char * const item_labels[] = {
-        "AI Usage",
+        "Kaboo",
+        "Claude",
         "Clock",
         "Battery",
         "Stopwatch",
@@ -3975,9 +3977,24 @@ void wp7_ui_start(void)
     set_brightness_immediate(s_wp7.brightness_percent);
 }
 
+static const char *battery_symbol(int soc)
+{
+    /* Five glyphs, each centred on 0/25/50/75/100%. */
+    static const char *const symbols[] = {
+        LV_SYMBOL_BATTERY_EMPTY, LV_SYMBOL_BATTERY_1, LV_SYMBOL_BATTERY_2,
+        LV_SYMBOL_BATTERY_3, LV_SYMBOL_BATTERY_FULL,
+    };
+    if (soc > 100) soc = 100;
+    return symbols[(soc + 12) / 25];
+}
+
 void wp7_ui_set_battery(int soc, int mv)
 {
     wp7_apps_set_battery(soc, mv);
+    /* A failed read (-1) keeps the last icon rather than flashing empty. */
+    if (soc >= 0 && s_wp7.status_battery_label != NULL) {
+        lv_label_set_text(s_wp7.status_battery_label, battery_symbol(soc));
+    }
 }
 
 static lv_obj_t *key_setting_obj(int32_t index)
@@ -4136,7 +4153,8 @@ void wp7_ui_key(wp7_key_t key, bool long_press)
             s_wp7.key_tile_index == WP7_SETTINGS_TILE_INDEX) {
             key_open_settings(false);
         } else if (!long_press && s_wp7.page == 0 &&
-                   s_wp7.key_tile_index >= 0 && s_wp7.key_tile_index < WP7_APP_COUNT) {
+                   s_wp7.key_tile_index >= 0 &&
+                   s_wp7.key_tile_index < WP7_SETTINGS_TILE_INDEX) {
             wp7_apps_open(lv_screen_active(), (wp7_app_id_t)s_wp7.key_tile_index,
                           wp7_status_height(), ui_bg_color(), ui_text_color(), theme_color());
         } else {
