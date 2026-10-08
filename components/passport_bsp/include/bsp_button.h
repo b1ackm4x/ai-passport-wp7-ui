@@ -17,9 +17,9 @@ typedef enum {
 
 typedef enum {
     BSP_BTN_PRESS = 0,   // 按下瞬间(低延迟,适合游戏类即时响应)
-    BSP_BTN_CLICK,       // 单击(按下并抬起)
-    BSP_BTN_DOUBLE,      // 双击
-    BSP_BTN_LONG,        // 长按
+    BSP_BTN_CLICK,       // 短按松开时立即上报;每次按下各报一次,成为长按的那次不报
+    BSP_BTN_DOUBLE,      // 两次快速点击后额外上报一次;这两次 CLICK 仍各自上报
+    BSP_BTN_LONG,        // 按住 0.8 s 时上报一次;松开后不再报 CLICK
 } bsp_btn_ev_t;
 
 // 按键事件回调。运行于 button 组件使用的共享 esp_timer 任务,只能入队或执行同等级

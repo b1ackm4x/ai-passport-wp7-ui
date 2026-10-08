@@ -9,7 +9,9 @@
 
 static const char *TAG = "bsp_lvgl";
 
-#define BSP_LVGL_DRAW_BUFFER_LINES 40
+// 两个 20 行缓冲与原来一个 40 行缓冲同为 19.2KB，但 LVGL 可以在上一段
+// 还在 DMA 发送时渲染下一段。
+#define BSP_LVGL_DRAW_BUFFER_LINES 20
 
 static lv_display_t *s_disp;
 static bool s_port_initialized;
@@ -80,10 +82,10 @@ lv_display_t *bsp_lvgl_init(void) {
     const lvgl_port_display_cfg_t dc = {
         .panel_handle = bsp_display_panel(),
         .io_handle    = bsp_display_io(),
-        // ⚠ C3 无 PSRAM,DMA 只能用内部 RAM。40 行单缓冲约 19.2KB，
-        // 可减少窗口命令和队列提交次数；仍保留单缓冲，避免双缓冲挤压音频/Wi-Fi。
+        // ⚠ C3 无 PSRAM,DMA 只能用内部 RAM。2 x 20 行双缓冲共约 19.2KB，
+        // 与原 40 行单缓冲相同；本固件没有音频和 Wi-Fi，不必再为它们省这部分内存。
         .buffer_size   = (uint32_t)BSP_LCD_W * BSP_LVGL_DRAW_BUFFER_LINES,
-        .double_buffer = false,
+        .double_buffer = true,
         .hres = BSP_LCD_W, .vres = BSP_LCD_H,
         // 旋转/镜像必须在这里配:esp_lvgl_port 注册显示时会重新下发 MADCTL,
         // 覆盖 bsp_display.c 里 esp_lcd_panel_mirror() 的设置。

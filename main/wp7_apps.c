@@ -20,6 +20,9 @@ static lv_obj_t *s_status_time;
 static lv_timer_t *s_timer;
 static wp7_app_id_t s_app;
 static bool s_clock_known;
+/* Set from the Mac's push rather than by hand; generation of that push. */
+static bool s_clock_synced;
+static uint32_t s_clock_generation;
 static uint64_t s_clock_base_s;
 static uint64_t s_clock_base_ms;
 static int16_t s_clock_timezone;
@@ -31,6 +34,10 @@ static uint64_t s_stopwatch_lap_ms;
 static uint32_t s_stopwatch_laps;
 static bool s_stopwatch_running;
 static uint32_t s_focus_preset = 1;
+static uint64_t s_focus_left_ms = 25 * 60000ULL;
+static uint64_t s_focus_start_ms;
+static bool s_focus_running;
+static bool s_ble_available = true;
 
 /* Usage pages. Kaboo shows token count, cost and top model for one of three
    periods; Claude shows two quota windows, each a label, percentage, bar and
@@ -46,10 +53,18 @@ static uint32_t s_focus_preset = 1;
 #define QUOTA_ALERT_PCT    90
 #define QUOTA_WARN_HEX     0xE3C800
 #define QUOTA_ALERT_HEX    0xE51400
+/* Bars grow to each new reading, including the first after the page opens. */
+#define QUOTA_BAR_ANIM_MS  420
+/* Switching the Kaboo period slides the numbers out and the new ones in, like
+   a WP7 pivot: the first half of the progress range leaves, the second enters. */
+#define KABOO_SLIDE_MS     300
+#define KABOO_SLIDE_PX     24
+#define KABOO_SLIDE_HALF   1000
 typedef struct {
     lv_obj_t *pct;
     lv_obj_t *bar;
     lv_obj_t *reset;
+    int32_t bar_target;
 } quota_row_t;
 static quota_row_t s_quota[2];
 static lv_obj_t *s_note;
@@ -58,11 +73,17 @@ static lv_obj_t *s_kaboo_tokens;
 static lv_obj_t *s_kaboo_cost;
 static lv_obj_t *s_kaboo_model;
 static uint32_t s_kaboo_period;
+static uint32_t s_kaboo_shown;   /* period whose numbers are on screen */
+static int32_t s_kaboo_slide_dir;
 static lv_color_t s_text_color;
 static lv_color_t s_accent_color;
-static uint64_t s_focus_left_ms = 25 * 60000ULL;
-static uint64_t s_focus_start_ms;
-static bool s_focus_running;
+/* Title and rows of the open page, in entrance order (see wp7_apps_items). */
+static wp7_app_item_t s_items[WP7_APP_MAX_ITEMS];
+static int32_t s_item_count;
+/* The open transition has finished; until then data animations wait. */
+static bool s_entered;
+
+static void refresh(lv_timer_t *timer);
 
 static uint64_t now_ms(void)
 {
@@ -130,11 +151,35 @@ static void set_color_if_changed(lv_obj_t *obj, lv_color_t color)
     }
 }
 
+static void bar_width_anim_cb(void *bar, int32_t width)
+{
+    lv_obj_set_width((lv_obj_t *)bar, width);
+}
+
+static void quota_bar_set(quota_row_t *row, int32_t width)
+{
+    /* Bars stay empty while the page slides in and fill once it has landed. */
+    if (!s_entered) width = 0;
+    if (row->bar_target == width) return;
+    row->bar_target = width;
+
+    /* The bar object is the animation's var, so deleting the page stops it. */
+    lv_anim_delete(row->bar, bar_width_anim_cb);
+    lv_anim_t anim;
+    lv_anim_init(&anim);
+    lv_anim_set_var(&anim, row->bar);
+    lv_anim_set_exec_cb(&anim, bar_width_anim_cb);
+    lv_anim_set_values(&anim, lv_obj_get_style_width(row->bar, 0), width);
+    lv_anim_set_duration(&anim, wp7_ui_anim_ms(QUOTA_BAR_ANIM_MS));
+    lv_anim_set_path_cb(&anim, lv_anim_path_ease_out);
+    lv_anim_start(&anim);
+}
+
 static void quota_row_blank(quota_row_t *row, const char *reset)
 {
     set_text_if_changed(row->pct, "--");
     set_color_if_changed(row->pct, s_text_color);
-    if (lv_obj_get_width(row->bar) != 0) lv_obj_set_width(row->bar, 0);
+    quota_bar_set(row, 0);
     set_text_if_changed(row->reset, reset);
 }
 
@@ -151,8 +196,7 @@ static void quota_row_show(quota_row_t *row, uint8_t pct, uint32_t resets_unix,
     char text[40];
     snprintf(text, sizeof(text), "%u%%", (unsigned)pct);
     set_text_if_changed(row->pct, text);
-    const int32_t width = QUOTA_BAR_W * pct / 100;
-    if (lv_obj_get_width(row->bar) != width) lv_obj_set_width(row->bar, width);
+    quota_bar_set(row, QUOTA_BAR_W * pct / 100);
 
     /* Past the reset time the percentage belongs to the previous window. */
     const bool expired = have_now && usage_model_quota_expired(resets_unix, now_unix);
@@ -225,7 +269,12 @@ static void format_tokens(char *out, size_t size, uint64_t tokens)
     snprintf(out, size, "%" PRIu64, tokens);
 }
 
-static void refresh_kaboo(void)
+static const char *no_data_note(void)
+{
+    return s_ble_available ? "Waiting for Mac" : "Bluetooth unavailable";
+}
+
+static void refresh_kaboo(const usage_snapshot_t *snap, bool have)
 {
     for (uint32_t i = 0; i < KABOO_PERIOD_COUNT; ++i) {
         const lv_opa_t opa = i == s_kaboo_period ? LV_OPA_COVER : LV_OPA_40;
@@ -234,79 +283,169 @@ static void refresh_kaboo(void)
         }
     }
 
-    usage_snapshot_t snap;
-    const bool have = usage_link_get(&snap, NULL);
-    if (!have || !(snap.flags & USAGE_FLAG_KABOO_VALID)) {
+    if (!have || !(snap->flags & USAGE_FLAG_KABOO_VALID)) {
         set_text_if_changed(s_kaboo_tokens, "--");
         set_text_if_changed(s_kaboo_cost, "--");
         set_text_if_changed(s_kaboo_model, "--");
-        set_text_if_changed(s_note, have ? "No Kaboo data" : "Waiting for Mac");
+        set_text_if_changed(s_note, have ? "No Kaboo data" : no_data_note());
         set_color_if_changed(s_note, lv_color_hex(USAGE_WARNING_HEX));
         return;
     }
 
-    uint64_t tokens = snap.today_tokens;
-    uint32_t cents = snap.today_cost_cents;
-    if (s_kaboo_period == 1) {
-        tokens = snap.week_tokens;
-        cents = snap.week_cost_cents;
-    } else if (s_kaboo_period == 2) {
-        tokens = snap.month_tokens;
-        cents = snap.month_cost_cents;
+    /* The numbers follow s_kaboo_shown, which a period switch changes halfway
+       through its slide; the header follows s_kaboo_period at once. */
+    uint64_t tokens = snap->today_tokens;
+    uint32_t cents = snap->today_cost_cents;
+    if (s_kaboo_shown == 1) {
+        tokens = snap->week_tokens;
+        cents = snap->week_cost_cents;
+    } else if (s_kaboo_shown == 2) {
+        tokens = snap->month_tokens;
+        cents = snap->month_cost_cents;
     }
     char text[32];
     format_tokens(text, sizeof(text), tokens);
     set_text_if_changed(s_kaboo_tokens, text);
     snprintf(text, sizeof(text), "$%" PRIu32 ".%02" PRIu32, cents / 100, cents % 100);
     set_text_if_changed(s_kaboo_cost, text);
-    set_text_if_changed(s_kaboo_model, snap.top_model[0] ? snap.top_model : "--");
+    set_text_if_changed(s_kaboo_model, snap->top_model[0] ? snap->top_model : "--");
 
     uint32_t now_unix = 0;
-    const bool have_now = usage_model_now_unix(&snap, true, esp_timer_get_time(),
+    const bool have_now = usage_model_now_unix(snap, true, esp_timer_get_time(),
                                                &now_unix);
     /* A stale source must not pass its old numbers off as current. */
-    const bool fresh = refresh_source_note(snap.kaboo_sampled_unix, now_unix, have_now);
+    const bool fresh = refresh_source_note(snap->kaboo_sampled_unix, now_unix, have_now);
     set_color_if_changed(s_kaboo_tokens, fresh ? s_accent_color : s_text_color);
 }
 
-static void refresh_claude(void)
+static void kaboo_slide_cb(void *var, int32_t progress)
 {
-    usage_snapshot_t snap;
-    const bool have = usage_link_get(&snap, NULL);
+    (void)var;
+    if (progress >= KABOO_SLIDE_HALF && s_kaboo_shown != s_kaboo_period) {
+        s_kaboo_shown = s_kaboo_period;
+        refresh(NULL);
+    }
+
+    /* Distance from rest: grows while the old numbers leave, shrinks while
+       the new ones arrive; squared so both halves ease toward the swap. */
+    const bool leaving = progress < KABOO_SLIDE_HALF;
+    const int32_t away = leaving ? progress : 2 * KABOO_SLIDE_HALF - progress;
+    const int32_t eased = away * away / KABOO_SLIDE_HALF;
+    const int32_t offset = KABOO_SLIDE_PX * eased / KABOO_SLIDE_HALF *
+                           (leaving ? -s_kaboo_slide_dir : s_kaboo_slide_dir);
+    const lv_opa_t opa = (lv_opa_t)(LV_OPA_COVER * (KABOO_SLIDE_HALF - eased) /
+                                    KABOO_SLIDE_HALF);
+    lv_obj_t *const values[] = { s_kaboo_tokens, s_kaboo_cost, s_kaboo_model };
+    for (size_t i = 0; i < sizeof(values) / sizeof(values[0]); ++i) {
+        if (values[i] == NULL) continue;
+        lv_obj_set_style_translate_x(values[i], offset, 0);
+        lv_obj_set_style_opa(values[i], opa, 0);
+    }
+}
+
+/* direction is +1 for the next period (numbers leave to the left) and -1 for
+   the previous one. */
+static void kaboo_switch_period(int32_t direction)
+{
+    if (s_kaboo_tokens != NULL && lv_anim_get(s_kaboo_tokens, kaboo_slide_cb) != NULL) {
+        /* Land the switch in progress before starting the next one. */
+        lv_anim_delete(s_kaboo_tokens, kaboo_slide_cb);
+        kaboo_slide_cb(NULL, 2 * KABOO_SLIDE_HALF);
+    }
+
+    s_kaboo_period = (s_kaboo_period + (direction > 0 ? 1 : KABOO_PERIOD_COUNT - 1)) %
+                     KABOO_PERIOD_COUNT;
+    s_kaboo_slide_dir = direction;
+    if (s_kaboo_tokens == NULL) {
+        s_kaboo_shown = s_kaboo_period;
+        return;
+    }
+
+    /* Keyed to a page object so deleting the page also stops the slide. */
+    lv_anim_t anim;
+    lv_anim_init(&anim);
+    lv_anim_set_var(&anim, s_kaboo_tokens);
+    lv_anim_set_exec_cb(&anim, kaboo_slide_cb);
+    lv_anim_set_values(&anim, 0, 2 * KABOO_SLIDE_HALF);
+    lv_anim_set_duration(&anim, wp7_ui_anim_ms(KABOO_SLIDE_MS));
+    lv_anim_start(&anim);
+}
+
+static void refresh_claude(const usage_snapshot_t *snap, bool have)
+{
     const lv_color_t warning = lv_color_hex(USAGE_WARNING_HEX);
-    if (!have || !(snap.flags & USAGE_FLAG_CLAUDE_VALID)) {
+    if (!have || !(snap->flags & USAGE_FLAG_CLAUDE_VALID)) {
         quota_row_blank(&s_quota[0], "");
         quota_row_blank(&s_quota[1], "");
-        set_text_if_changed(s_note, have ? "No quota data" : "Waiting for Mac");
+        set_text_if_changed(s_note, have ? "No quota data" : no_data_note());
         set_color_if_changed(s_note, warning);
         return;
     }
 
     uint32_t now_unix = 0;
-    const bool have_now = usage_model_now_unix(&snap, true, esp_timer_get_time(),
+    const bool have_now = usage_model_now_unix(snap, true, esp_timer_get_time(),
                                                &now_unix);
-    const bool fresh = refresh_source_note(snap.claude_sampled_unix, now_unix, have_now);
+    const bool fresh = refresh_source_note(snap->claude_sampled_unix, now_unix, have_now);
 
     /* Claude Code reports a window only while it is active; show a missing
        window as inactive rather than as 0%. */
-    if (snap.flags & USAGE_FLAG_FIVE_HOUR) {
-        quota_row_show(&s_quota[0], snap.five_hour_pct, snap.five_hour_resets_unix,
+    if (snap->flags & USAGE_FLAG_FIVE_HOUR) {
+        quota_row_show(&s_quota[0], snap->five_hour_pct, snap->five_hour_resets_unix,
                        now_unix, have_now, fresh);
     } else {
         quota_row_blank(&s_quota[0], "Not active");
     }
-    if (snap.flags & USAGE_FLAG_SEVEN_DAY) {
-        quota_row_show(&s_quota[1], snap.seven_day_pct, snap.seven_day_resets_unix,
+    if (snap->flags & USAGE_FLAG_SEVEN_DAY) {
+        quota_row_show(&s_quota[1], snap->seven_day_pct, snap->seven_day_resets_unix,
                        now_unix, have_now, fresh);
     } else {
         quota_row_blank(&s_quota[1], "Not active");
     }
 }
 
-static lv_obj_t *panel_label(int32_t x, int32_t y, const lv_font_t *font,
-                             lv_color_t color)
+/* Every Mac push carries its UTC time and offset, so the clock is right after
+   each boot without setting it by hand. A manual change lasts until the next
+   push. */
+static void sync_clock(const usage_snapshot_t *snap, uint32_t generation)
 {
-    lv_obj_t *label = lv_label_create(s_panel);
+    uint32_t now_unix = 0;
+    if (generation == s_clock_generation ||
+            !usage_model_now_unix(snap, true, esp_timer_get_time(), &now_unix)) {
+        return;
+    }
+    s_clock_generation = generation;
+    s_clock_known = true;
+    s_clock_synced = true;
+    s_clock_base_s = now_unix;
+    s_clock_base_ms = now_ms();
+    s_clock_timezone = snap->tz_offset_minutes;
+}
+
+static void add_item(lv_obj_t *obj, int32_t x, int32_t y, int32_t w, int32_t h)
+{
+    if (s_item_count >= WP7_APP_MAX_ITEMS) return;
+    s_items[s_item_count++] = (wp7_app_item_t) { .obj = obj, .x = x, .y = y, .w = w, .h = h };
+}
+
+/* A transparent, full-width row of the page. The launcher slides whole rows in
+   and out, so everything on one line of the page lives in the same row. */
+static lv_obj_t *add_row(int32_t y, int32_t h)
+{
+    /* The new panel has no layout yet, so take the width it was given. */
+    const int32_t width = lv_obj_get_style_width(s_panel, LV_PART_MAIN);
+    lv_obj_t *row = lv_obj_create(s_panel);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_pos(row, 0, y);
+    lv_obj_set_size(row, width, h);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    add_item(row, 0, y, width, h);
+    return row;
+}
+
+static lv_obj_t *row_label(lv_obj_t *row, int32_t x, int32_t y, const lv_font_t *font,
+                           lv_color_t color)
+{
+    lv_obj_t *label = lv_label_create(row);
     lv_label_set_text(label, "");
     lv_obj_set_style_text_font(label, font, 0);
     lv_obj_set_style_text_color(label, color, 0);
@@ -317,14 +456,15 @@ static lv_obj_t *panel_label(int32_t x, int32_t y, const lv_font_t *font,
 static void create_quota_row(quota_row_t *row, int32_t y, const char *name,
                              lv_color_t text, lv_color_t accent)
 {
-    lv_label_set_text(panel_label(12, y + 4, &lv_font_montserrat_16, text), name);
-    row->pct = panel_label(12, y, &lv_font_montserrat_22, accent);
+    lv_obj_t *block = add_row(y, 64);
+    lv_label_set_text(row_label(block, 12, 4, &lv_font_montserrat_16, text), name);
+    row->pct = row_label(block, 12, 0, &lv_font_montserrat_22, accent);
     lv_obj_set_width(row->pct, QUOTA_BAR_W);
     lv_obj_set_style_text_align(row->pct, LV_TEXT_ALIGN_RIGHT, 0);
 
-    lv_obj_t *track = lv_obj_create(s_panel);
+    lv_obj_t *track = lv_obj_create(block);
     lv_obj_remove_style_all(track);
-    lv_obj_set_pos(track, 12, y + 32);
+    lv_obj_set_pos(track, 12, 32);
     lv_obj_set_size(track, QUOTA_BAR_W, 8);
     lv_obj_set_style_bg_color(track, text, 0);
     lv_obj_set_style_bg_opa(track, LV_OPA_20, 0);
@@ -336,7 +476,7 @@ static void create_quota_row(quota_row_t *row, int32_t y, const char *name,
     lv_obj_set_style_bg_color(row->bar, accent, 0);
     lv_obj_set_style_bg_opa(row->bar, LV_OPA_COVER, 0);
 
-    row->reset = panel_label(12, y + 46, &lv_font_montserrat_14, text);
+    row->reset = row_label(block, 12, 46, &lv_font_montserrat_14, text);
 }
 
 static void refresh(lv_timer_t *timer)
@@ -346,23 +486,31 @@ static void refresh(lv_timer_t *timer)
     char value[48];
     char detail[128];
     char clock[16];
+    usage_snapshot_t snap;
+    uint32_t generation = 0;
+    const bool have = usage_link_get(&snap, &generation);
+    if (have) sync_clock(&snap, generation);
     format_clock(clock, sizeof(clock), now, false);
     set_text_if_changed(s_status_time, clock);
     if (!s_panel) return;
 
     switch (s_app) {
         case WP7_APP_KABOO:
-            refresh_kaboo();
+            refresh_kaboo(&snap, have);
             set_text_if_changed(s_hint, "UP/DOWN  Period\nHOLD OK  Back");
             return;
         case WP7_APP_CLAUDE:
-            refresh_claude();
+            refresh_claude(&snap, have);
             set_text_if_changed(s_hint, "HOLD OK  Back");
             return;
         case WP7_APP_CLOCK:
             format_clock(value, sizeof(value), now, true);
-            snprintf(detail, sizeof(detail), "%s\nTime resets when power is lost.",
-                     s_clock_known ? "Manual time" : "Set time with buttons");
+            if (s_clock_synced) {
+                snprintf(detail, sizeof(detail), "Synced from Mac\nUpdates with each push.");
+            } else {
+                snprintf(detail, sizeof(detail), "%s\nTime resets when power is lost.",
+                         s_clock_known ? "Manual time" : "Set with buttons or the Mac");
+            }
             set_text_if_changed(s_hint, "UP +1h   DOWN +1m\nHOLD UP/DOWN +6h/+10m\nHOLD OK Back");
             break;
         case WP7_APP_BATTERY:
@@ -418,13 +566,21 @@ void wp7_apps_set_battery(int soc, int mv)
     refresh(NULL);
 }
 
+void wp7_apps_set_ble_available(bool available)
+{
+    s_ble_available = available;
+}
+
 bool wp7_apps_open(lv_obj_t *screen, wp7_app_id_t app, int32_t status_h,
                    lv_color_t bg, lv_color_t text, lv_color_t accent)
 {
     if (s_panel || app >= WP7_APP_COUNT) return false;
     s_app = app;
+    s_item_count = 0;
+    s_entered = false;
     const int32_t width = lv_obj_get_width(screen);
     const int32_t height = lv_obj_get_height(screen) - status_h;
+    const int32_t content_w = width - 24;
     s_panel = lv_obj_create(screen);
     lv_obj_remove_style_all(s_panel);
     lv_obj_set_pos(s_panel, 0, status_h);
@@ -432,70 +588,78 @@ bool wp7_apps_open(lv_obj_t *screen, wp7_app_id_t app, int32_t status_h,
     lv_obj_set_style_bg_color(s_panel, bg, 0);
     lv_obj_set_style_bg_opa(s_panel, LV_OPA_COVER, 0);
     lv_obj_remove_flag(s_panel, LV_OBJ_FLAG_SCROLLABLE);
+    /* Hidden until the launcher's open transition reaches the page. */
+    lv_obj_add_flag(s_panel, LV_OBJ_FLAG_HIDDEN);
 
+    /* The title is sized and pivoted like the UI Settings title, which the
+       transition scales as it flies in. */
+    const int32_t title_h = lv_font_montserrat_22.line_height + 4;
     s_title = lv_label_create(s_panel);
     lv_obj_set_style_text_font(s_title, &lv_font_montserrat_22, 0);
     lv_obj_set_style_text_color(s_title, text, 0);
     lv_label_set_text(s_title, s_titles[app]);
     lv_obj_set_pos(s_title, 12, 13);
+    lv_obj_set_size(s_title, content_w, title_h);
+    lv_obj_set_style_transform_pivot_x(s_title, 0, 0);
+    lv_obj_set_style_transform_pivot_y(s_title, title_h / 2, 0);
+    add_item(s_title, 12, 13, content_w, title_h);
 
-    lv_obj_t *stripe = lv_obj_create(s_panel);
+    lv_obj_t *stripe_row = add_row(49, 5);
+    lv_obj_t *stripe = lv_obj_create(stripe_row);
     lv_obj_remove_style_all(stripe);
-    lv_obj_set_pos(stripe, 12, 49);
+    lv_obj_set_pos(stripe, 12, 0);
     lv_obj_set_size(stripe, 54, 5);
     lv_obj_set_style_bg_color(stripe, accent, 0);
     lv_obj_set_style_bg_opa(stripe, LV_OPA_COVER, 0);
 
     s_text_color = text;
     s_accent_color = accent;
+    s_kaboo_shown = s_kaboo_period;
     if (app == WP7_APP_KABOO) {
         static const char *const periods[KABOO_PERIOD_COUNT] = {
             "today", "7 days", "30 days",
         };
+        lv_obj_t *row = add_row(70, 20);
         int32_t x = 12;
         for (uint32_t i = 0; i < KABOO_PERIOD_COUNT; ++i) {
-            s_kaboo_periods[i] = panel_label(x, 70, &lv_font_montserrat_16, text);
+            s_kaboo_periods[i] = row_label(row, x, 0, &lv_font_montserrat_16, text);
             lv_label_set_text(s_kaboo_periods[i], periods[i]);
             lv_obj_update_layout(s_kaboo_periods[i]);
             x += lv_obj_get_width(s_kaboo_periods[i]) + 16;
         }
-        lv_label_set_text(panel_label(12, 108, &lv_font_montserrat_16, text), "Tokens");
-        s_kaboo_tokens = panel_label(12, 104, &lv_font_montserrat_22, accent);
-        lv_label_set_text(panel_label(12, 142, &lv_font_montserrat_16, text), "Cost");
-        s_kaboo_cost = panel_label(12, 138, &lv_font_montserrat_22, text);
-        lv_obj_set_width(s_kaboo_tokens, width - 24);
-        lv_obj_set_width(s_kaboo_cost, width - 24);
+        row = add_row(104, 28);
+        lv_label_set_text(row_label(row, 12, 4, &lv_font_montserrat_16, text), "Tokens");
+        s_kaboo_tokens = row_label(row, 12, 0, &lv_font_montserrat_22, accent);
+        lv_obj_set_width(s_kaboo_tokens, content_w);
         lv_obj_set_style_text_align(s_kaboo_tokens, LV_TEXT_ALIGN_RIGHT, 0);
+        row = add_row(138, 28);
+        lv_label_set_text(row_label(row, 12, 4, &lv_font_montserrat_16, text), "Cost");
+        s_kaboo_cost = row_label(row, 12, 0, &lv_font_montserrat_22, text);
+        lv_obj_set_width(s_kaboo_cost, content_w);
         lv_obj_set_style_text_align(s_kaboo_cost, LV_TEXT_ALIGN_RIGHT, 0);
-        lv_label_set_text(panel_label(12, 174, &lv_font_montserrat_14, text), "Top model");
-        s_kaboo_model = panel_label(12, 192, &lv_font_montserrat_16, text);
-        lv_obj_set_width(s_kaboo_model, width - 24);
+        row = add_row(174, 38);
+        lv_label_set_text(row_label(row, 12, 0, &lv_font_montserrat_14, text), "Top model");
+        s_kaboo_model = row_label(row, 12, 18, &lv_font_montserrat_16, text);
+        lv_obj_set_width(s_kaboo_model, content_w);
         lv_obj_set_height(s_kaboo_model, lv_font_montserrat_16.line_height);
         lv_label_set_long_mode(s_kaboo_model, LV_LABEL_LONG_DOT);
-        s_note = panel_label(12, 218, &lv_font_montserrat_14, text);
+        s_note = row_label(add_row(218, 18), 12, 0, &lv_font_montserrat_14, text);
     } else if (app == WP7_APP_CLAUDE) {
         create_quota_row(&s_quota[0], 70, "5-hour", text, accent);
         create_quota_row(&s_quota[1], 144, "7-day", text, accent);
-        s_note = panel_label(12, 218, &lv_font_montserrat_14, text);
+        s_note = row_label(add_row(218, 18), 12, 0, &lv_font_montserrat_14, text);
     } else {
-        s_value = lv_label_create(s_panel);
-        lv_obj_set_style_text_font(s_value, &lv_font_montserrat_22, 0);
-        lv_obj_set_style_text_color(s_value, accent, 0);
-        lv_obj_set_pos(s_value, 12, 78);
-        lv_obj_set_width(s_value, width - 24);
-
-        s_detail = lv_label_create(s_panel);
-        lv_obj_set_style_text_font(s_detail, &lv_font_montserrat_16, 0);
-        lv_obj_set_style_text_color(s_detail, text, 0);
-        lv_obj_set_pos(s_detail, 12, 124);
-        lv_obj_set_width(s_detail, width - 24);
+        s_value = row_label(add_row(78, 28), 12, 0, &lv_font_montserrat_22, accent);
+        lv_obj_set_width(s_value, content_w);
+        /* The detail runs to four lines when the Clock text wraps, so its row
+           takes all the space down to the hint. */
+        s_detail = row_label(add_row(124, height - 46 - 124), 12, 0,
+                             &lv_font_montserrat_16, text);
+        lv_obj_set_width(s_detail, content_w);
     }
 
-    s_hint = lv_label_create(s_panel);
-    lv_obj_set_style_text_font(s_hint, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(s_hint, text, 0);
-    lv_obj_set_pos(s_hint, 12, height - 46);
-    lv_obj_set_width(s_hint, width - 24);
+    s_hint = row_label(add_row(height - 46, 46), 12, 0, &lv_font_montserrat_14, text);
+    lv_obj_set_width(s_hint, content_w);
     refresh(NULL);
     return true;
 }
@@ -508,6 +672,9 @@ void wp7_apps_close(void)
     s_note = s_kaboo_tokens = s_kaboo_cost = s_kaboo_model = NULL;
     memset(s_kaboo_periods, 0, sizeof(s_kaboo_periods));
     memset(s_quota, 0, sizeof(s_quota));
+    memset(s_items, 0, sizeof(s_items));
+    s_item_count = 0;
+    s_entered = false;
 }
 
 bool wp7_apps_active(void)
@@ -515,12 +682,32 @@ bool wp7_apps_active(void)
     return s_panel != NULL;
 }
 
+int32_t wp7_apps_items(wp7_app_item_t *items, int32_t capacity)
+{
+    const int32_t count = s_item_count < capacity ? s_item_count : capacity;
+    memcpy(items, s_items, (size_t)count * sizeof(items[0]));
+    return count;
+}
+
+void wp7_apps_set_visible(bool visible)
+{
+    if (s_panel == NULL || lv_obj_has_flag(s_panel, LV_OBJ_FLAG_HIDDEN) == !visible) return;
+    if (visible) lv_obj_remove_flag(s_panel, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(s_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+void wp7_apps_entered(void)
+{
+    if (s_panel == NULL || s_entered) return;
+    s_entered = true;
+    refresh(NULL);
+}
+
 void wp7_apps_key(wp7_key_t key, bool long_press)
 {
     const uint64_t now = now_ms();
     if (s_app == WP7_APP_KABOO && !long_press && key != WP7_KEY_OK) {
-        s_kaboo_period = (s_kaboo_period + (key == WP7_KEY_DOWN ? 1 : KABOO_PERIOD_COUNT - 1)) %
-                         KABOO_PERIOD_COUNT;
+        kaboo_switch_period(key == WP7_KEY_DOWN ? 1 : -1);
     } else if (s_app == WP7_APP_CLOCK) {
         if (key == WP7_KEY_UP || key == WP7_KEY_DOWN) {
             const uint64_t local = s_clock_known ? clock_local_seconds(now) : 0;
@@ -529,6 +716,7 @@ void wp7_apps_key(wp7_key_t key, bool long_press)
                                   (long_press ? 10 * 60 : 60);
             const uint64_t adjusted = (local + step) % 86400;
             s_clock_known = true;
+            s_clock_synced = false;
             s_clock_base_s = adjusted;
             s_clock_base_ms = now;
             s_clock_timezone = 0;

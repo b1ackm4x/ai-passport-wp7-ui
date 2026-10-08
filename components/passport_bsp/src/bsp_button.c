@@ -25,6 +25,9 @@ static adc_cali_handle_t         s_cali;
 
 #define BSP_BTN_ATTEN  ADC_ATTEN_DB_12       // 量程约 0~3100mV,覆盖松开态
 
+// 长按判定时长。组件默认 1.5 s,按住"返回"太久;0.8 s 仍明显长于一次普通点击。
+#define BSP_BTN_LONG_PRESS_MS  800
+
 // Use the public button-driver interface, not button_adc's global registry:
 // button 4.2.0 leaves an occupied index behind when its core allocation fails.
 // These static drivers and the single ADC/calibration pair are owned by BSP.
@@ -75,10 +78,25 @@ static void on_event(void *arg, void *usr_data, bsp_btn_ev_t ev) {
     if (!s_ready || !s_cb) return;
     s_cb((bsp_btn_t)(intptr_t)usr_data, ev, s_user);
 }
-static void cb_press (void *a, void *u) { on_event(a, u, BSP_BTN_PRESS);  }
-static void cb_click (void *a, void *u) { on_event(a, u, BSP_BTN_CLICK);  }
+
+// 本次按下是否已经成为长按。只在 button 组件的定时回调里读写，不需要加锁。
+static bool s_long_fired[BSP_BTN_COUNT];
+
+// CLICK 在松开时立即上报，除非这次按下已经触发了长按。不用组件的 SINGLE_CLICK：
+// 它要在松开后再等 short_press_time(默认 180 ms)排除双击；两次按下间隔小于这个
+// 时间时只报 DOUBLE_CLICK、不报单击，连按三次则什么都不报，快速连按会整组丢失。
+static void cb_press(void *a, void *u) {
+    s_long_fired[(intptr_t)u] = false;
+    on_event(a, u, BSP_BTN_PRESS);
+}
+static void cb_release(void *a, void *u) {
+    if (!s_long_fired[(intptr_t)u]) on_event(a, u, BSP_BTN_CLICK);
+}
 static void cb_double(void *a, void *u) { on_event(a, u, BSP_BTN_DOUBLE); }
-static void cb_long  (void *a, void *u) { on_event(a, u, BSP_BTN_LONG);   }
+static void cb_long(void *a, void *u) {
+    s_long_fired[(intptr_t)u] = true;
+    on_event(a, u, BSP_BTN_LONG);
+}
 
 // 初始化中途失败时先停掉所有 button driver，再释放本文件持有的校准与 ADC unit。
 // button driver 仍在轮询时不能先删 ADC，否则 timer callback 会访问失效句柄。
@@ -117,7 +135,7 @@ static void button_cleanup(void) {
 
 static esp_err_t register_callbacks(button_handle_t button, void *index) {
     esp_err_t e = iot_button_register_cb(button, BUTTON_PRESS_DOWN, NULL, cb_press, index);
-    if (e == ESP_OK) e = iot_button_register_cb(button, BUTTON_SINGLE_CLICK, NULL, cb_click, index);
+    if (e == ESP_OK) e = iot_button_register_cb(button, BUTTON_PRESS_UP, NULL, cb_release, index);
     if (e == ESP_OK) e = iot_button_register_cb(button, BUTTON_DOUBLE_CLICK, NULL, cb_double, index);
     if (e == ESP_OK) e = iot_button_register_cb(button, BUTTON_LONG_PRESS_START, NULL, cb_long, index);
     return e;
@@ -176,7 +194,7 @@ esp_err_t bsp_button_init(bsp_btn_cb_t cb, void *user) {
             .base = { .get_key_level = button_level, .del = button_driver_delete },
             .index = (unsigned)i,
         };
-        const button_config_t bc = { 0 };
+        const button_config_t bc = { .long_press_time = BSP_BTN_LONG_PRESS_MS };
         esp_err_t e = iot_button_create(&bc, &s_drivers[i].base, &s_btn[i]);
         if (e != ESP_OK || !s_btn[i]) {
             ESP_LOGE(TAG, "按键 %d 创建失败 (%s) —— 检查 GPIO%d 的 ADC 配置与分压电阻",
